@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spotify authorisation</title>
+<!--
+  Optional landing page for the ESP32 Now Playing remote.
+
+  WHAT IT IS FOR
+  Spotify requires HTTPS for any redirect URI that is not a loopback
+  address, so the ESP32's own LAN address can never be registered. The
+  default redirect is http://127.0.0.1:8888/callback, which simply fails to
+  load - the authorisation code is still in the address bar, and you paste
+  the URL into the device.
+
+  If you own a domain you can point the redirect at it instead and host this
+  file there. Then the browser lands on a real page that shows the code with
+  a copy button, rather than a connection error.
+
+  HOW TO USE
+  1. Upload this file so it is served at the exact path you registered,
+     e.g. https://yourdomain.com/callback  (a file named "callback" with no
+     extension, or /callback/index.html - both work).
+  2. Register that exact URL in the Spotify dashboard.
+  3. Set SPOTIFY_REDIRECT_URI in include/config.h to the same string.
+
+  IT IS ENTIRELY STATIC. No server-side code, no analytics, no requests to
+  anywhere. The code is read from the URL by the script below and displayed;
+  it is never transmitted. Your server's access log will contain the code in
+  the query string - that is harmless here, because under PKCE an
+  authorisation code is useless without the code verifier, which never
+  leaves the ESP32. It is also single-use and expires in about a minute.
+-->
+<style>
+ :root{color-scheme:dark}
+ body{margin:0;background:#0b0c0b;color:#eee;
+      font:16px/1.6 system-ui,-apple-system,Segoe UI,sans-serif;
+      display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px}
+ .card{max-width:560px;width:100%;background:#1c1c1c;border:1px solid #333;
+       border-radius:14px;padding:28px}
+ h1{font-size:20px;margin:0 0 6px}
+ h1 .dot{color:#2ed15c}
+ p{color:#aaa;margin:10px 0}
+ code{display:block;background:#0e0e0e;border:1px solid #333;border-radius:8px;
+      padding:14px;margin:16px 0;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+      word-break:break-all;color:#eee}
+ button{background:#2ed15c;color:#06210f;border:0;border-radius:8px;
+        padding:11px 18px;font:600 15px system-ui;cursor:pointer}
+ button:active{transform:translateY(1px)}
+ .bad{color:#f56}
+ .muted{color:#777;font-size:13px}
+ ol{color:#aaa;padding-left:22px;margin:10px 0}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1><span class="dot">&#9679;</span> <span id="head">Authorisation code</span></h1>
+  <div id="body"></div>
+  <p class="muted">This page is static. The code is read from the address bar
+     and shown here &mdash; it is not sent anywhere.</p>
+</div>
+
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var code = q.get('code');
+  var err  = q.get('error');
+  var head = document.getElementById('head');
+  var body = document.getElementById('body');
+
+  if (err) {
+    head.textContent = 'Authorisation failed';
+    head.previousElementSibling; // keep the dot element in place
+    body.innerHTML = '<p class="bad">Spotify returned: <strong>' +
+      err.replace(/[<>&]/g, '') + '</strong></p>' +
+      '<p>Start again from the device setup page.</p>';
+    return;
+  }
+
+  if (!code) {
+    head.textContent = 'Nothing to do here';
+    body.innerHTML = '<p>This page only does something when Spotify sends you ' +
+      'here after you approve access.</p>' +
+      '<p>Open your device setup page and follow the authorise link.</p>';
+    return;
+  }
+
+  body.innerHTML =
+    '<p>Paste this into the <strong>Complete sign-in</strong> box on your ' +
+    'device setup page:</p>' +
+    '<code id="code"></code>' +
+    '<button id="copy">Copy code</button>' +
+    '<p class="muted" style="margin-top:18px">It is single-use and expires in ' +
+    'about a minute. If it stops working, just authorise again.</p>';
+
+  /* textContent, not innerHTML: the code comes from the URL and must never
+     be interpreted as markup. */
+  document.getElementById('code').textContent = code;
+
+  document.getElementById('copy').addEventListener('click', function () {
+    var btn = this;
+    var done = function () { btn.textContent = 'Copied';
+                             setTimeout(function () { btn.textContent = 'Copy code'; }, 1600); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(code).then(done, fallback);
+    } else { fallback(); }
+    function fallback() {
+      /* clipboard API needs a secure context and permission; select the
+         text instead so a long-press or Ctrl-C still works. */
+      var r = document.createRange();
+      r.selectNodeContents(document.getElementById('code'));
+      var sel = window.getSelection();
+      sel.removeAllRanges(); sel.addRange(r);
+      btn.textContent = 'Selected - press Ctrl/Cmd+C';
+    }
+  });
+})();
+</script>
+</body>
+</html>
