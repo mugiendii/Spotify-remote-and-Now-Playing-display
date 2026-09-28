@@ -15,6 +15,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <WiFiGeneric.h>   /* arduino_event_id_t */
 
 #include "AppState.h"
 
@@ -75,7 +76,12 @@ class NetManager {
   void sampleRssi();
   void loadCredentials();
   void pollScan();
+  void serviceScan();
   bool beginScan();
+  void releaseRadio();
+  /* Abandon any scan, in progress or pending, and hand the radio back. */
+  void cancelScan(const char *why);
+  static void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info);
   static int8_t rssiToBars(int32_t rssi);
 
   NetState _state         = NetState::Down;
@@ -91,10 +97,14 @@ class NetManager {
   char _ip[16]   = {0};
 
   bool       _scanning   = false;
+  bool       _scanWanted = false;   /* asked for, radio not yet free      */
+  bool       _radioParked = false;  /* association suppressed for a scan  */
   bool       _scanDone   = false;
   bool       _scanFailed = false;
   uint8_t    _scanTries  = 0;
-  uint32_t   _nextScanAt = 0;
+  uint32_t   _scanAt     = 0;   /* when the next scan step may run      */
+  uint32_t   _scanDeadline = 0; /* hard stop for a scan in progress     */
+  uint32_t   _parkDeadline = 0; /* hard stop for holding the radio      */
   uint8_t    _netCount = 0;
   ScannedNet _nets[MAX_NETS];
 };

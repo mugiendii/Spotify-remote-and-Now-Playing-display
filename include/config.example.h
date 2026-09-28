@@ -39,6 +39,16 @@
  * moment to apply the change, hence the delay rather than an instant poll. */
 #define POLL_AFTER_COMMAND_MS       700UL
 
+/* How long a successful command's intent outranks a contradicting poll.
+ *
+ * Spotify regularly takes over a second to report a transport change, so
+ * without this the fast poll above arrives still saying "playing", undoes
+ * the optimistic "paused", and the button looks like it did nothing. The
+ * window closes early the moment a poll agrees, so this is a ceiling, not
+ * a delay. Raise it if your playback device is slow to report; lower it if
+ * a genuinely rejected command lingers on screen. */
+#define COMMAND_SETTLE_MS          3000UL
+
 /* How long an explicit device selection is protected after we ask Spotify
  * to transfer. Spotify keeps reporting the previous device for a moment,
  * and releasing the pin inside that window would send the next command
@@ -112,7 +122,16 @@
  * ====================================================================== */
 #define WIFI_CONNECT_TIMEOUT_MS   20000UL   /* per connection attempt      */
 #define WIFI_RETRY_INTERVAL_MS    10000UL   /* wait between attempts       */
-#define HTTP_TIMEOUT_MS            8000UL   /* per API request             */
+/* Per API request. This is a UI budget as much as a network one: the whole
+ * firmware shares a single task, so a request that hangs freezes touch
+ * sampling and redrawing for exactly this long. When that happens it looks
+ * precisely like broken touch hardware - buttons do not light up and the
+ * screen stops following changes made elsewhere.
+ *
+ * A poll response is two or three kilobytes, so anything beyond a couple of
+ * seconds is already a failure; waiting longer only prolongs the freeze.
+ * The loop-time watchdog in main.cpp reports when this bites. */
+#define HTTP_TIMEOUT_MS            4000UL
 #define ART_HTTP_TIMEOUT_MS       12000UL   /* album-art download          */
 
 /* =========================================================================

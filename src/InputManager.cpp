@@ -24,6 +24,73 @@ static XPT2046_Touchscreen ts(PIN_TOUCH_CS);
 static constexpr int16_t TAP_SLOP_PX = 18;
 #endif  /* TOUCH_ENABLED */
 
+#if TOUCH_ENABLED
+/* One 12-bit conversion, driven directly rather than through the library,
+ * so the probe works regardless of whether the panel is being touched.
+ * Same CS interlock as every other touch access. */
+static uint16_t xptRaw(uint8_t cmd) {
+  SPI.beginTransaction(SPISettings(SPI_TOUCH_FREQUENCY, MSBFIRST, SPI_MODE0));
+  digitalWrite(TFT_CS, HIGH);          /* park the panel */
+  digitalWrite(PIN_TOUCH_CS, LOW);
+  SPI.transfer(cmd);
+  const uint16_t hi = SPI.transfer(0);
+  const uint16_t lo = SPI.transfer(0);
+  digitalWrite(PIN_TOUCH_CS, HIGH);
+  SPI.endTransaction();
+  return (uint16_t)(((hi << 8) | lo) >> 3);   /* 12 significant bits */
+}
+#endif
+
+void InputManager::selfTest() {
+#if !TOUCH_ENABLED
+  _touchHealthy = false;
+  LOG_I("touch: disabled at compile time (TOUCH_ENABLED 0)");
+#else
+  /* Sample the X plate repeatedly. An untouched panel floats, so a live
+   * controller returns slightly different values each time. A bus that is
+   * not wired through returns the same value every time - all zeroes when
+   * MISO is low, all ones when it floats high. That difference is the
+   * whole test. */
+  uint16_t lo = 0xFFFF, hi = 0;
+  uint16_t first = 0;
+  bool     identical = true;
+
+  for (int i = 0; i < 12; ++i) {
+    const uint16_t v = xptRaw(0xD1);        /* X position, 12-bit */
+    if (i == 0) first = v;
+    else if (v != first) identical = false;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+    delayMicroseconds(200);
+  }
+  const uint16_t z1 = xptRaw(0xB1);
+
+  LOG_I("touch: probe cs=%d irq=%d -> x %u..%u (%s), z1 %u",
+        PIN_TOUCH_CS, PIN_TOUCH_IRQ, lo, hi,
+        identical ? "IDENTICAL" : "varying", z1);
+
+  _touchHealthy = !identical;
+  if (identical && (first == 0 || first == 4095)) {
+    LOG_E("touch: controller is NOT responding (every read was %u). Check "
+          "T_CS=%d, T_CLK=%d, T_DIN=%d, T_DO=%d and that the panel's touch "
+          "header is actually connected.",
+          first, PIN_TOUCH_CS, TFT_SCLK, TFT_MOSI, TFT_MISO);
+  } else if (identical) {
+    LOG_E("touch: readings never change (%u) - suspect a wiring fault", first);
+  } else {
+    LOG_I("touch: controller responding normally");
+  }
+
+#if PIN_TOUCH_IRQ >= 0
+  /* T_IRQ idles HIGH and pulls LOW on contact. Stuck LOW with nothing
+   * touching it usually means the pin is not really connected. */
+  pinMode(PIN_TOUCH_IRQ, INPUT);
+  LOG_I("touch: T_IRQ reads %s at rest (expected HIGH)",
+        digitalRead(PIN_TOUCH_IRQ) ? "HIGH" : "LOW - suspect");
+#endif
+#endif
+}
+
 void InputManager::begin() {
 #if TOUCH_ENABLED
   /* The touch CS must be an output and parked high before anything else

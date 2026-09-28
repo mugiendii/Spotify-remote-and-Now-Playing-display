@@ -26,6 +26,7 @@ Rendering is direct `TFT_eSPI` drawing — no LVGL.
 - [First-run setup on the device](#first-run-setup-on-the-device)
 - [Using your own domain](#using-your-own-domain)
 - [Device selection and transfer](#device-selection-and-transfer)
+- [Running it without a touchscreen](#running-it-without-a-touchscreen)
 - [HTTP API](#http-api)
 - [Build and upload](#build-and-upload)
 - [Configuration reference](#configuration-reference)
@@ -34,6 +35,7 @@ Rendering is direct `TFT_eSPI` drawing — no LVGL.
 - [RAM usage and the artwork strategy](#ram-usage-and-the-artwork-strategy)
 - [Why TFT_eSPI and not LovyanGFX](#why-tft_espi-and-not-lovyangfx)
 - [Concurrency](#concurrency)
+- [Recovery console (serial)](#recovery-console-serial)
 - [Tests](#tests)
 - [Troubleshooting](#troubleshooting)
 
@@ -400,10 +402,64 @@ seven assertions in the host tests.
 
 ---
 
+## Running it without a touchscreen
+
+The page at `http://<device-ip>/` is a **complete replacement for the touch
+panel**, not just a setup page. That matters for two groups: anyone who built
+with `TOUCH_ENABLED 0`, and anyone whose touch layer turns out not to be
+wired (see [Buttons never light up](#buttons-never-light-up-when-pressed)).
+
+From a browser you get:
+
+| | |
+|---|---|
+| Now playing | title, artist, album, device, play state |
+| Transport | previous, play, pause, next |
+| Seek | drag the position slider |
+| Volume | slider, disabled when the device does not support it |
+| Shuffle / repeat | toggle and cycle |
+| **Device selection** | list with type, volume and restricted/no-volume flags, plus *Use this* to transfer, and a *Keep playing during transfer* toggle |
+| Wi-Fi | scan, join, forget |
+| Spotify | sign in, sign out, client ID |
+
+When the boot probe finds the touch controller unresponsive, the device puts
+the URL on screen rather than leaving you prodding a panel that will never
+answer:
+
+```
+No touch detected - control at http://192.168.1.50/
+```
+
+If touch is dead and the device is on the wrong network, neither the panel
+nor the browser can reach it — that is what the
+[serial recovery console](#recovery-console-serial) is for.
+
+---
+
 ## HTTP API
 
 The device serves a small REST API on port 80 (`WEB_SERVER_PORT`). The setup
 page at `/` uses it, and so can anything else on your network.
+
+**Including Wi-Fi**, so a device whose touchscreen is unreachable can still be
+moved to another network from a browser:
+
+| Method | Path | Parameters |
+|---|---|---|
+| GET | `/api/wifi/scan` | — (starts a scan, returns what is known so far) |
+| PUT | `/api/wifi` | `ssid`, optional `password` |
+| POST | `/api/wifi/forget` | — |
+
+```bash
+curl "http://192.168.1.50/api/wifi/scan"
+curl -X PUT "http://192.168.1.50/api/wifi" \
+     --data-urlencode "ssid=FasterNetwork" --data-urlencode "password=..."
+```
+
+Joining a new network drops the connection the request arrived on, so the
+change is applied one loop iteration *after* the response is flushed — a
+browser error at that point is expected, not a failure. Reconnect to the new
+address the device shows on screen.
 
 | Method | Path | Parameters |
 |---|---|---|
@@ -940,6 +996,44 @@ are all `static_assert` failures. See
 
 ---
 
+## Recovery console (serial)
+
+Every other way into the device can itself fail: the touchscreen needs
+working touch hardware, and the web page needs the device already on your
+network. Store one bad SSID on a unit whose touch layer is not wired, and
+there is no way back short of erasing flash.
+
+The serial console needs neither — just the USB cable you flash with.
+
+```
+pio device monitor        # 115200
+help
+```
+
+| Command | Does |
+|---|---|
+| `status` | Wi-Fi state, SSID, IP, signal, Spotify sign-in, heap |
+| `scan` | list visible networks |
+| `ssid <name>` | stage an SSID (spaces are fine) |
+| `pass <password>` | stage a password (spaces are fine; never echoed) |
+| `join` | save the staged credentials and connect |
+| `forget` | erase stored Wi-Fi credentials |
+| `touch` | re-run the touch controller probe |
+| `signout` | erase the Spotify refresh token |
+| `reboot` | restart |
+
+```
+ssid MyHotspot
+pass hunter2
+join
+```
+
+Credentials are staged and then committed rather than parsed from one line,
+because SSIDs and passwords both routinely contain spaces and any
+single-line syntax would have to guess where one ends.
+
+---
+
 ## Troubleshooting
 
 ### Blank or white screen
@@ -953,6 +1047,51 @@ voltage its silkscreen asks for.
 The CS interlock is broken. Both the panel and the XPT2046 are driving MISO.
 Check `PIN_TOUCH_CS` differs from `TFT_CS`, and that `USE_HSPI_PORT` is *not*
 defined.
+
+### Buttons never light up when pressed
+
+Two completely different faults look identical from the front of the panel,
+so the firmware distinguishes them for you in the serial log at 115200.
+
+**1. The touch controller is not responding.** At boot it is probed directly
+over SPI:
+
+```
+touch: probe cs=26 irq=25 -> x 1873..1902 (varying), z1 12
+touch: controller responding normally
+```
+
+An untouched panel floats, so a live controller returns slightly different
+values each time. A bus that is not wired through returns the same value
+every read:
+
+```
+touch: probe cs=26 irq=25 -> x 0..0 (IDENTICAL), z1 0
+touch: controller is NOT responding (every read was 0). Check T_CS=26,
+       T_CLK=18, T_DIN=23, T_DO=19 ...
+```
+
+That is a wiring fault — most often the touch header simply not connected,
+or `T_DO`/`T_DIN` swapped. The display half will work perfectly throughout,
+because it uses different pins for chip select.
+
+**2. The main loop is starved.** Everything shares one task, so a blocking
+network call freezes touch sampling *and* redrawing. The symptoms are
+identical to dead touch: nothing lights up, and the screen stops following
+changes made elsewhere. The loop-time watchdog names it:
+
+```
+loop: worst iteration 4100ms (6s ago) - the UI was frozen that long;
+      touch and redraws were starved
+```
+
+Healthy is under a millisecond, with a poll costing a couple of hundred.
+Anything approaching a second means the UI was unresponsive for that long.
+`HTTP_TIMEOUT_MS` is the ceiling on a single freeze — it is a UI budget as
+much as a network one.
+
+A third, simpler possibility if presses register but land wrong: see
+[Touch calibration](#touch-calibration).
 
 ### Display works, touch does nothing
 
@@ -1093,6 +1232,24 @@ root cause.
 `apiSend()` now adds `Content-Length: 0` to every non-GET request without a
 body, and a `411` case exists purely to say "firmware bug" if it ever
 returns.
+
+### A button flips back a moment after you press it
+
+The UI updates optimistically the instant you press, because waiting for a
+network round trip makes the panel feel broken. The poll that follows a
+command is deliberately fast, to pick up what Spotify actually did. Those two
+fight each other: Spotify often takes over a second to report a transport
+change, so the fast poll arrives still saying *playing*, overwrites the
+optimistic *paused*, and the button appears to have done nothing.
+
+A successful command now records what it asked for, and for up to
+`COMMAND_SETTLE_MS` (3 s) any polled value contradicting it is ignored. The
+window closes the moment a poll agrees, so it is a ceiling rather than a
+delay, and it is armed **only on success** — a rejected command must be
+allowed to correct the optimistic value.
+
+Raise `COMMAND_SETTLE_MS` if your playback device is slow to report; lower it
+if a genuinely rejected command lingers on screen.
 
 ### Controls do nothing, message says "Not permitted"
 

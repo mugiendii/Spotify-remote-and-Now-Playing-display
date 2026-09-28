@@ -140,6 +140,7 @@ class SpotifyClient {
   void buildUrl(char *out, size_t outLen, const char *path, const char *query);
 
   void pollDevices();
+  void reconcileIntent();
   void loadClientId();
 
   static constexpr uint8_t QUEUE_LEN = 4;
@@ -157,6 +158,8 @@ class SpotifyClient {
   char     _refreshToken[300] = {0};
   uint32_t _tokenExpiresAt    = 0;    /* millis() deadline                 */
   bool     _tokenHeld         = false;
+
+  PlayerIntent _intent;
 
   DeviceList _devices;
   char       _targetDevice[ID_LEN] = {0};

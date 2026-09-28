@@ -184,6 +184,43 @@ struct DeviceList {
 };
 
 /* -------------------------------------------------------------------------
+ *  PlayerIntent - what the user just asked for, held briefly so a poll that
+ *  has not caught up yet cannot undo it.
+ *
+ *  The UI updates optimistically the instant a button is pressed, because
+ *  waiting for a network round trip makes a panel feel broken. The poll
+ *  that follows a command is deliberately fast, to pick up what Spotify
+ *  actually did. Those two good ideas fight each other: Spotify often takes
+ *  more than a second to report a transport change, so the fast poll
+ *  arrives still saying "playing", overwrites the optimistic "paused", and
+ *  the button appears to have done nothing at all.
+ *
+ *  So a successful command records what it asked for, and for a short
+ *  window any polled value that contradicts it is ignored. The moment a
+ *  poll agrees, the window closes - it is not a fixed delay, just a guard
+ *  against stale feedback.
+ *
+ *  Armed only on SUCCESS. A command that failed means the optimistic value
+ *  is wrong, and the poll must be allowed to correct it.
+ * ---------------------------------------------------------------------- */
+struct PlayerIntent {
+  uint32_t   until      = 0;     /* millis() deadline; 0 = not armed       */
+  bool       hasPlaying = false; bool       playing = false;
+  bool       hasShuffle = false; bool       shuffle = false;
+  bool       hasRepeat  = false; RepeatMode repeat  = RepeatMode::Off;
+  bool       hasVolume  = false; int16_t    volume  = 0;
+
+  bool armed() const { return until != 0; }
+  void arm(uint32_t nowMs, uint32_t windowMs) { until = nowMs + windowMs; }
+  void clear() { *this = PlayerIntent{}; }
+
+  /* Re-impose anything the poll contradicts. Returns true while still
+   * guarding; false once it has expired or Spotify has agreed on
+   * everything, at which point the caller should clear it. */
+  bool reconcile(PlaybackState &st, uint32_t nowMs) const;
+};
+
+/* -------------------------------------------------------------------------
  *  Command-target policy.
  *
  *  Two requirements pull against each other:
@@ -205,6 +242,24 @@ struct DeviceList {
  *  An empty activeId does NOT release the pin: nothing is playing anywhere,
  *  and a pinned device is exactly what a Play press should wake.
  * ---------------------------------------------------------------------- */
+inline bool PlayerIntent::reconcile(PlaybackState &st, uint32_t nowMs) const {
+  if (!armed()) return false;
+  if ((int32_t)(nowMs - until) >= 0) return false;      /* window expired  */
+
+  bool allAgree = true;
+  if (hasPlaying && st.isPlaying != playing) { st.isPlaying = playing; allAgree = false; }
+  if (hasShuffle && st.shuffle   != shuffle) { st.shuffle   = shuffle; allAgree = false; }
+  if (hasRepeat  && st.repeat    != repeat)  { st.repeat    = repeat;  allAgree = false; }
+  /* Volume is the one the device may legitimately refuse to set exactly -
+   * some speakers quantise it - so treat "close enough" as agreement
+   * rather than fighting the hardware for the whole window. */
+  if (hasVolume && st.volumePercent >= 0) {
+    const int diff = (int)st.volumePercent - (int)volume;
+    if (diff > 2 || diff < -2) { st.volumePercent = volume; allAgree = false; }
+  }
+  return !allAgree;     /* still guarding only while something disagrees */
+}
+
 inline bool shouldReleaseDevicePin(const char *pinned, const char *activeId,
                                    bool transferGraceActive) {
   if (!pinned || !*pinned)        return false;   /* nothing pinned        */

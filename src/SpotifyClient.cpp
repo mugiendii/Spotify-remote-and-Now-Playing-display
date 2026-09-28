@@ -534,6 +534,10 @@ void SpotifyClient::parsePlayer(Stream &stream) {
   const char *note = PlayerParser::apply(doc, *_st, chooseArtUrl);
   if (note) _status->setMessage(note, MESSAGE_TIMEOUT_MS);
 
+  /* Put back anything this poll contradicts that the user has just asked
+   * for and Spotify has not reported yet. */
+  reconcileIntent();
+
   /* Follow Spotify Connect. If the user moved playback in the Spotify app,
    * the device they chose here is stale - keeping it would send the next
    * command back to the device they just walked away from. */
@@ -630,8 +634,19 @@ bool SpotifyClient::enqueue(Cmd c, int32_t arg, const char *deviceId) {
 
 void SpotifyClient::cmdPrevious() { enqueue(Cmd::Prev); }
 void SpotifyClient::cmdNext()     { enqueue(Cmd::Next); }
-void SpotifyClient::cmdPlay()     { enqueue(Cmd::Play);  _st->isPlaying = true; }
-void SpotifyClient::cmdPause()    { enqueue(Cmd::Pause); _st->isPlaying = false; }
+void SpotifyClient::cmdPlay() {
+  enqueue(Cmd::Play);
+  _st->isPlaying = true;
+  _intent.hasPlaying = true;
+  _intent.playing    = true;
+}
+
+void SpotifyClient::cmdPause() {
+  enqueue(Cmd::Pause);
+  _st->isPlaying = false;
+  _intent.hasPlaying = true;
+  _intent.playing    = false;
+}
 
 void SpotifyClient::cmdPlayPause() {
   /* Optimistic local flip so the button reacts instantly; the follow-up
@@ -640,6 +655,8 @@ void SpotifyClient::cmdPlayPause() {
   enqueue(wantPlay ? Cmd::Play : Cmd::Pause);
   _st->isPlaying = wantPlay;
   _st->anchorProgress(_st->progressNow());
+  _intent.hasPlaying = true;
+  _intent.playing    = wantPlay;
 }
 
 void SpotifyClient::cmdVolume(int16_t percent) {
@@ -647,6 +664,8 @@ void SpotifyClient::cmdVolume(int16_t percent) {
   if (percent > 100) percent = 100;
   enqueue(Cmd::Volume, percent);
   _st->volumePercent = percent;     /* optimistic, corrected on next poll */
+  _intent.hasVolume  = true;
+  _intent.volume     = percent;
 }
 
 void SpotifyClient::cmdSeek(uint32_t positionMs) {
@@ -661,12 +680,16 @@ void SpotifyClient::cmdSeek(uint32_t positionMs) {
 
 void SpotifyClient::cmdShuffle(bool on) {
   enqueue(Cmd::Shuffle, on ? 1 : 0);
-  _st->shuffle = on;
+  _st->shuffle       = on;
+  _intent.hasShuffle = true;
+  _intent.shuffle    = on;
 }
 
 void SpotifyClient::cmdRepeat(RepeatMode mode) {
   enqueue(Cmd::Repeat, (int32_t)mode);
-  _st->repeat = mode;
+  _st->repeat       = mode;
+  _intent.hasRepeat = true;
+  _intent.repeat    = mode;
 }
 
 void SpotifyClient::cmdTransfer(const char *deviceId, bool play) {
@@ -753,11 +776,24 @@ bool SpotifyClient::runCommand(const Pending &p) {
       (code == HTTP_CODE_TOO_MANY_REQUESTS) ? retryAfterSeconds() : 0;
   _apiHttp.end();
 
+  /* One rule, one place: anything that is not an accepted response means
+   * the optimistic local value is wrong, so drop the guard and let the
+   * next poll tell the truth. Doing this per-branch invited exactly the
+   * bug where a newly added case forgot to. The success path re-arms it
+   * below. */
+  const bool accepted = (code == HTTP_CODE_OK || code == HTTP_CODE_NO_CONTENT ||
+                         code == HTTP_CODE_ACCEPTED);
+  if (!accepted) _intent.clear();
+
   switch (code) {
     case HTTP_CODE_OK:
     case HTTP_CODE_NO_CONTENT:
     case HTTP_CODE_ACCEPTED:
       LOG_I("spotify: command ok (%d)", code);
+      /* Guard the optimistic value until Spotify catches up. Armed only
+       * here: a command that failed means the local value is wrong and the
+       * next poll must be allowed to correct it. */
+      _intent.arm(millis(), COMMAND_SETTLE_MS);
       /* Re-poll shortly: Spotify needs a moment to apply the change, and
        * the UI should show what actually happened, not what we asked for. */
       _nextPollAt = millis() + POLL_AFTER_COMMAND_MS;
@@ -824,6 +860,16 @@ bool SpotifyClient::runCommand(const Pending &p) {
 /* =========================================================================
  *  Devices
  * ====================================================================== */
+void SpotifyClient::reconcileIntent() {
+  if (!_intent.armed()) return;
+  if (!_intent.reconcile(*_st, millis())) {
+    /* Either the window ran out or Spotify now agrees on everything -
+     * either way, stop second-guessing the server. */
+    LOG_D("spotify: command settled");
+    _intent.clear();
+  }
+}
+
 void SpotifyClient::pollDevices() {
   const int code = apiSend("GET", DEVICES_URL, nullptr);
 

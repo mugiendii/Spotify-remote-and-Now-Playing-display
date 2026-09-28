@@ -365,6 +365,96 @@ static void testDevicePinPolicy() {
   CHECK(!shouldReleaseDevicePin("D1", nullptr, false), "null active keeps the pin");
 }
 
+static void testPlayerIntent() {
+  std::cout << "command intent: surviving a poll that has not caught up\n";
+  const uint32_t NOW = 100000;          /* the shim's fixed clock */
+
+  /* The exact failure this exists for: tap pause, poll arrives 700 ms
+   * later still reporting playing, and the button looks dead. */
+  {
+    PlaybackState st; st.isPlaying = true;          /* what the poll said */
+    PlayerIntent in; in.hasPlaying = true; in.playing = false;
+    in.arm(NOW, 3000);
+    const bool guarding = in.reconcile(st, NOW + 700);
+    CHECK(!st.isPlaying, "optimistic pause survives a stale poll");
+    CHECK(guarding, "still guarding while Spotify disagrees");
+  }
+
+  /* Once Spotify agrees, stop overriding - the guard is not a fixed delay. */
+  {
+    PlaybackState st; st.isPlaying = false;
+    PlayerIntent in; in.hasPlaying = true; in.playing = false;
+    in.arm(NOW, 3000);
+    CHECK(!in.reconcile(st, NOW + 700), "guard released once the poll agrees");
+  }
+
+  /* After the window, the server wins even if it still disagrees -
+   * otherwise a silently-ignored command would be invisible forever. */
+  {
+    PlaybackState st; st.isPlaying = true;
+    PlayerIntent in; in.hasPlaying = true; in.playing = false;
+    in.arm(NOW, 3000);
+    CHECK(!in.reconcile(st, NOW + 3001), "window expires");
+    CHECK(st.isPlaying, "expired guard does not touch the polled value");
+  }
+
+  /* Unarmed intent must never override anything. */
+  {
+    PlaybackState st; st.isPlaying = true;
+    PlayerIntent in; in.hasPlaying = true; in.playing = false;   /* not armed */
+    CHECK(!in.reconcile(st, NOW), "unarmed intent is inert");
+    CHECK(st.isPlaying, "unarmed intent leaves the polled value alone");
+  }
+
+  /* Shuffle and repeat have the same race. */
+  {
+    PlaybackState st; st.shuffle = false; st.repeat = RepeatMode::Off;
+    PlayerIntent in;
+    in.hasShuffle = true; in.shuffle = true;
+    in.hasRepeat  = true; in.repeat  = RepeatMode::Track;
+    in.arm(NOW, 3000);
+    in.reconcile(st, NOW + 700);
+    CHECK(st.shuffle, "shuffle intent survives");
+    CHECK(st.repeat == RepeatMode::Track, "repeat intent survives");
+  }
+
+  /* Volume: some speakers quantise, so near-misses count as agreement
+   * rather than fighting the hardware for the whole window. */
+  {
+    PlaybackState st; st.volumePercent = 49;
+    PlayerIntent in; in.hasVolume = true; in.volume = 50;
+    in.arm(NOW, 3000);
+    CHECK(!in.reconcile(st, NOW + 700), "1% off counts as agreement");
+    CHECK(st.volumePercent == 49, "device's own rounding is respected");
+  }
+  {
+    PlaybackState st; st.volumePercent = 20;
+    PlayerIntent in; in.hasVolume = true; in.volume = 50;
+    in.arm(NOW, 3000);
+    CHECK(in.reconcile(st, NOW + 700), "a real disagreement is guarded");
+    CHECK(st.volumePercent == 50, "requested volume restored");
+  }
+
+  /* An unknown volume (-1) must not be overwritten - that is "the device
+   * does not report one", not "the device disagrees". */
+  {
+    PlaybackState st; st.volumePercent = -1;
+    PlayerIntent in; in.hasVolume = true; in.volume = 50;
+    in.arm(NOW, 3000);
+    in.reconcile(st, NOW + 700);
+    CHECK(st.volumePercent == -1, "unknown volume left as unknown");
+  }
+
+  /* clear() really disarms. */
+  {
+    PlaybackState st; st.isPlaying = true;
+    PlayerIntent in; in.hasPlaying = true; in.playing = false;
+    in.arm(NOW, 3000); in.clear();
+    CHECK(!in.armed(), "clear() disarms");
+    CHECK(!in.reconcile(st, NOW + 100), "cleared intent is inert");
+  }
+}
+
 int main() {
   std::cout << "PlayerParser host tests (ART_BOX_PX=" << ART_BOX_PX << ")\n\n";
   testTrack();
@@ -380,6 +470,7 @@ int main() {
   testDeviceListOverflow();
   testEmptyDeviceList();
   testDevicePinPolicy();
+  testPlayerIntent();
   std::cout << "\n" << (g_checks - g_failures) << "/" << g_checks
             << " checks passed\n";
   if (g_failures) std::cout << g_failures << " FAILURE(S)\n";

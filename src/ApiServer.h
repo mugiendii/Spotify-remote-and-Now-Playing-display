@@ -57,6 +57,11 @@ class ApiServer {
  private:
   void routes();
 
+  /* ---- Wi-Fi (usable without the touchscreen) ---- */
+  void handleWifiScan();
+  void handleWifiSet();
+  void handleWifiForget();
+
   /* ---- setup pages ---- */
   void handleRoot();
   void handleAuthStart();
@@ -93,4 +98,12 @@ class ApiServer {
   NetManager    *_net     = nullptr;
   bool           _running = false;
   bool           _routed  = false;
+
+  /* Joining a new network tears down the socket this request arrived on,
+   * so the change is applied one loop iteration later - after the response
+   * has actually been flushed. Otherwise the browser reports a failure for
+   * an operation that worked. */
+  bool _wifiChangePending = false;
+  char _pendingSsid[33]   = {0};
+  char _pendingPass[65]   = {0};
 };

@@ -50,6 +50,18 @@ class InputManager {
  public:
   void begin();
 
+  /* Probe the touch controller over SPI at boot and log a verdict.
+   *
+   * Worth having because a dead touch layer and a starved main loop look
+   * identical from the front of the panel: in both cases buttons never
+   * light up. This says which one you have, without a scope. */
+  void selfTest();
+
+  /* False once selfTest() has found the controller unresponsive. The UI
+   * uses it to point the user at the web interface instead of leaving them
+   * prodding a panel that will never answer. */
+  bool touchHealthy() const { return _touchHealthy; }
+
   /* Sample touch. At most one event per call. */
   TouchEvent pollTouch();
 
@@ -63,6 +75,7 @@ class InputManager {
   void mapRaw(uint16_t rawX, uint16_t rawY, int16_t &sx, int16_t &sy);
 
   /* ---- touch ---- */
+  bool     _touchHealthy = true;
   bool     _down        = false;
   int16_t  _x = 0, _y = 0;
   int16_t  _downX = 0, _downY = 0;

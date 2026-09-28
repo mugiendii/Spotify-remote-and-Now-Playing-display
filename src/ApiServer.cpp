@@ -57,15 +57,51 @@ static const char PAGE_INDEX[] PROGMEM = R"HTML(<!doctype html>
 </div>
 
 <div class="card">
- <h2>Playback</h2>
+ <h2>Wi-Fi</h2>
+ <p class="muted">Usable when the touchscreen is not. Switching networks will
+    drop this page &mdash; reconnect to the new address the device shows.</p>
+ <p id="wnow">-</p>
+ <select id="wlist" style="width:100%;padding:10px;border-radius:7px;
+    border:1px solid #444;background:#111;color:#eee;font:14px system-ui">
+   <option value="">Scanning...</option></select>
+ <input id="wpass" type="password" placeholder="Password (blank if open)"
+        autocomplete="off" style="margin-top:10px">
+ <button onclick="wjoin()">Join network</button>
+ <button class="sec" onclick="wscan()">Rescan</button>
+ <p id="wmsg" class="muted"></p>
+</div>
+
+<div class="card">
+ <h2>Now playing</h2>
  <p id="np">-</p>
- <button class="sec" onclick="cmd('previous')">Prev</button>
- <button class="sec" onclick="cmd('play')">Play</button>
- <button class="sec" onclick="cmd('pause')">Pause</button>
- <button class="sec" onclick="cmd('next')">Next</button>
- <p><a href="/api/spotify/devices">/api/spotify/devices</a> &middot;
-    <a href="/api/spotify/currently-playing">/api/spotify/currently-playing</a></p>
- <button class="sec" onclick="signout()">Sign out of Spotify</button>
+ <p class="muted" id="npdev">-</p>
+
+ <div id="seekwrap">
+   <input id="seek" type="range" min="0" max="1000" value="0" style="width:100%">
+   <p class="muted"><span id="tpos">0:00</span> / <span id="tdur">0:00</span></p>
+ </div>
+
+ <button class="sec" onclick="cmd('previous')">&#9664;&#9664;</button>
+ <button onclick="cmd('play')">&#9654; Play</button>
+ <button class="sec" onclick="cmd('pause')">&#10073;&#10073; Pause</button>
+ <button class="sec" onclick="cmd('next')">&#9654;&#9654;</button>
+ <br>
+ <button class="sec" id="bshuf" onclick="toggleShuffle()">Shuffle: ?</button>
+ <button class="sec" id="brep" onclick="cycleRepeat()">Repeat: ?</button>
+
+ <p class="muted" style="margin-top:16px">Volume <span id="vpct">-</span></p>
+ <input id="vol" type="range" min="0" max="100" value="50" style="width:100%">
+ <p id="pmsg" class="muted"></p>
+</div>
+
+<div class="card">
+ <h2>Playback device</h2>
+ <p class="muted">Pick where Spotify should play. This is the device-selection
+    screen, usable without the touchscreen.</p>
+ <label class="muted"><input type="checkbox" id="keep" checked>
+   Keep playing during transfer</label>
+ <div id="devs"><p class="muted">Loading...</p></div>
+ <button class="sec" onclick="loadDevs()">Refresh devices</button>
 </div>
 
 <script>
@@ -109,11 +145,152 @@ async function finish(){
 async function signout(){
  await fetch('/api/auth/signout',{method:'POST'}); refresh();
 }
-async function cmd(c){
- await fetch('/api/spotify/'+c,{method:'POST'});
- setTimeout(refresh,900);
+function mmss(ms){
+ const t=Math.floor(ms/1000), m=Math.floor(t/60), s=t%60;
+ return m+':'+String(s).padStart(2,'0');
 }
-refresh(); link(); setInterval(refresh,5000);
+let dragging=false, vdragging=false, state={};
+$('seek').addEventListener('input',()=>{dragging=true;});
+$('seek').addEventListener('change',async e=>{
+ dragging=false;
+ if(!state.item) return;
+ const ms=Math.round(state.item.duration_ms*(e.target.value/1000));
+ await put('/api/spotify/seek?position_ms='+ms);
+});
+$('vol').addEventListener('input',()=>{vdragging=true; $('vpct').textContent=$('vol').value+'%';});
+$('vol').addEventListener('change',async e=>{
+ vdragging=false;
+ await put('/api/spotify/volume?volume_percent='+e.target.value);
+});
+
+async function put(url){
+ try{
+  const r=await fetch(url,{method:'PUT'});
+  const j=await r.json().catch(()=>({}));
+  $('pmsg').textContent = r.ok ? '' : (j.detail||j.error||('HTTP '+r.status));
+  setTimeout(np,900);
+  return r.ok;
+ }catch(e){ $('pmsg').textContent='device unreachable'; return false; }
+}
+async function cmd(c){
+ try{
+  const r=await fetch('/api/spotify/'+c,{method:'POST'});
+  const j=await r.json().catch(()=>({}));
+  $('pmsg').textContent = r.ok ? '' : (j.detail||j.error||('HTTP '+r.status));
+ }catch(e){ $('pmsg').textContent='device unreachable'; }
+ setTimeout(np,900);
+}
+async function toggleShuffle(){ await put('/api/spotify/shuffle?state='+(state.shuffle?'false':'true')); }
+async function cycleRepeat(){
+ const order={off:'context',context:'track',track:'off'};
+ await put('/api/spotify/repeat?state='+(order[state.repeat]||'context'));
+}
+
+async function np(){
+ try{
+  const p=await (await fetch('/api/spotify/currently-playing')).json();
+  state=p;
+  if(p.item){
+   $('np').textContent=p.item.name+' - '+p.item.artist;
+   $('npdev').textContent=(p.item.album||'')+(p.is_playing?'  |  playing':'  |  paused');
+   $('tdur').textContent=mmss(p.item.duration_ms);
+   $('tpos').textContent=mmss(p.progress_ms);
+   if(!dragging && p.item.duration_ms)
+     $('seek').value=Math.round(1000*p.progress_ms/p.item.duration_ms);
+  } else {
+   $('np').textContent='Nothing playing';
+   $('npdev').textContent='';
+  }
+  if(p.device){
+   $('npdev').textContent += '  |  on '+p.device.name;
+   if(!vdragging && p.device.volume_percent!==null){
+     $('vol').value=p.device.volume_percent;
+     $('vpct').textContent=p.device.volume_percent+'%';
+   }
+   $('vol').disabled = !p.device.supports_volume;
+   if(!p.device.supports_volume) $('vpct').textContent='not supported';
+  } else {
+   $('npdev').textContent='No active Spotify device. Open Spotify on your phone, TV or computer.';
+  }
+  $('bshuf').textContent='Shuffle: '+(p.shuffle?'on':'off');
+  $('brep').textContent='Repeat: '+(p.repeat||'off');
+ }catch(e){ /* left alone; the status line reports reachability */ }
+}
+
+async function loadDevs(){
+ try{
+  const d=await (await fetch('/api/spotify/devices')).json();
+  if(!d.devices || !d.devices.length){
+   $('devs').innerHTML='<p class="muted">No Spotify devices found. '+
+     'Open Spotify on your phone, TV or computer.</p>';
+   return;
+  }
+  $('devs').innerHTML = d.devices.map(v => {
+   const flags=[v.type];
+   if(v.volume_percent!==null) flags.push('vol '+v.volume_percent+'%');
+   if(v.is_restricted) flags.push('restricted');
+   else if(!v.supports_volume) flags.push('no remote volume');
+   const btn = v.is_restricted
+     ? '<button class="sec" disabled>restricted</button>'
+     : '<button class="sec" onclick="useDev(\''+v.id+'\')">'+
+       (v.is_active?'active':'Use this')+'</button>';
+   return '<p>'+(v.is_active?'&#9679; ':'&#9675; ')+'<strong>'+v.name+'</strong><br>'+
+          '<span class="muted">'+flags.join(' &middot; ')+'</span><br>'+btn+'</p>';
+  }).join('');
+ }catch(e){ $('devs').innerHTML='<p class="bad">Could not read devices.</p>'; }
+}
+async function useDev(id){
+ await put('/api/spotify/active-device?device_id='+encodeURIComponent(id)+
+           '&play='+($('keep').checked?'true':'false'));
+ setTimeout(loadDevs,1200);
+}
+
+let wtimer=null;
+async function wscan(){
+ $('wmsg').textContent='Scanning...';
+ try{
+  const w=await (await fetch('/api/wifi/scan')).json();
+  $('wnow').textContent = w.connected
+    ? 'Connected to '+w.current+'  (signal '+w.bars+'/4)'
+    : (w.current ? 'Saved: '+w.current+' (not connected)' : 'No network saved');
+  const sel=$('wlist');
+  if(w.networks.length){
+   sel.innerHTML = w.networks.map(n =>
+     '<option value="'+n.ssid.replace(/"/g,'&quot;')+'">'+n.ssid+
+     '  ('+n.bars+'/4'+(n.secured?'':', open')+')</option>').join('');
+   $('wmsg').textContent='';
+  } else {
+   /* value="" on purpose: an <option> with no value attribute returns its
+      LABEL from .value, so a placeholder would be submitted as an SSID.
+      That is exactly how a device once ended up trying to associate with a
+      network called "No 2.4 GHz networks found". */
+   sel.innerHTML='<option value="">'+
+     (w.failed?'Scan failed - retrying':'No 2.4 GHz networks found')+'</option>';
+  }
+  /* The scan is asynchronous on the device; poll until it settles. */
+  if(w.scanning){ clearTimeout(wtimer); wtimer=setTimeout(wscan,1500); }
+ }catch(e){ $('wmsg').textContent='Could not reach the device.'; }
+}
+async function wjoin(){
+ const ssid=$('wlist').value;
+ /* Every placeholder carries value="", so this one check covers all of
+    them - scanning, scan-failed and nothing-found alike. */
+ if(!ssid){ $('wmsg').textContent='Pick a real network first.'; return; }
+ $('wmsg').textContent='Joining '+ssid+'...';
+ try{
+  const r=await fetch('/api/wifi',{method:'PUT',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:'ssid='+encodeURIComponent(ssid)+'&password='+encodeURIComponent($('wpass').value)});
+  const j=await r.json();
+  $('wmsg').textContent = j.note || 'Joining...';
+ }catch(e){
+  /* Expected: the socket dies with the old association. */
+  $('wmsg').textContent='Joining - this page has lost contact, which is normal.';
+ }
+ $('wpass').value='';
+}
+refresh(); link(); wscan(); np(); loadDevs();
+setInterval(refresh,5000); setInterval(np,2000);
 </script>
 </div></body></html>)HTML";
 
@@ -148,6 +325,15 @@ void ApiServer::stop() {
 
 void ApiServer::service() {
   if (_running) _server.handleClient();
+
+  /* Applied here rather than in the handler so the HTTP response is already
+   * on the wire before the association drops. */
+  if (_wifiChangePending) {
+    _wifiChangePending = false;
+    LOG_I("http: switching Wi-Fi to \"%s\"", _pendingSsid);
+    if (_net) _net->setCredentials(_pendingSsid, _pendingPass);
+    memset(_pendingPass, 0, sizeof(_pendingPass));
+  }
 }
 
 /* =========================================================================
@@ -206,6 +392,13 @@ void ApiServer::routes() {
   _server.on("/api/auth/signout", HTTP_POST, [this]() { handleSignOut(); });
   _server.on("/api/client-id", HTTP_PUT, [this]() { handleClientId(); });
   _server.on("/api/client-id", HTTP_POST, [this]() { handleClientId(); });
+
+  /* Wi-Fi, so a device whose touchscreen is unreachable can still be moved
+   * to another network. */
+  _server.on("/api/wifi/scan", HTTP_GET, [this]() { handleWifiScan(); });
+  _server.on("/api/wifi", HTTP_PUT, [this]() { handleWifiSet(); });
+  _server.on("/api/wifi", HTTP_POST, [this]() { handleWifiSet(); });
+  _server.on("/api/wifi/forget", HTTP_POST, [this]() { handleWifiForget(); });
 
   /* ---- the simplified device + playback API ---- */
   _server.on("/api/spotify/devices", HTTP_GET, [this]() { handleDevices(); });
@@ -305,6 +498,90 @@ void ApiServer::handleClientId() {
     return;
   }
   _spotify->setClientId(id.c_str());
+  sendJson(200, F("{\"ok\":true}"));
+}
+
+/* =========================================================================
+ *  Wi-Fi
+ * ====================================================================== */
+void ApiServer::handleWifiScan() {
+  if (!_net) {
+    sendJson(500, F("{\"error\":\"no network manager\"}"));
+    return;
+  }
+  /* Scanning is asynchronous and takes a few seconds. Kick one off if none
+   * is running and answer with whatever is currently known, so the page can
+   * poll rather than hold a connection open across a scan. */
+  if (!_net->scanning()) _net->startScan();
+
+  JsonDocument doc;
+  doc["scanning"]   = _net->scanning();
+  doc["failed"]     = _net->scanFailed();
+  doc["current"]    = _net->ssid();
+  doc["connected"]  = _net->isUp();
+  doc["bars"]       = _net->bars();
+  JsonArray arr = doc["networks"].to<JsonArray>();
+  for (uint8_t i = 0; i < _net->networkCount(); ++i) {
+    const ScannedNet &n = _net->networks()[i];
+    JsonObject o = arr.add<JsonObject>();
+    o["ssid"]    = n.ssid;
+    o["bars"]    = n.bars;
+    o["secured"] = n.secured;
+  }
+  String out;
+  serializeJson(doc, out);
+  sendJson(200, out);
+}
+
+void ApiServer::handleWifiSet() {
+  String ssid, pass;
+  if (!param("ssid", ssid)) {
+    sendJson(400, F("{\"error\":\"ssid required\"}"));
+    return;
+  }
+  param("password", pass);       /* absent or empty = open network */
+
+  if (ssid.length() > 32) {
+    sendJson(400, F("{\"error\":\"ssid longer than 32 characters\"}"));
+    return;
+  }
+  if (pass.length() > 63) {
+    sendJson(400, F("{\"error\":\"password longer than 63 characters\"}"));
+    return;
+  }
+
+  /* Second line of defence. A UI slip should not be able to strand the
+   * device on a network that does not exist - which, with no working touch
+   * panel, needs a serial cable to undo. `force=1` overrides, for hidden
+   * SSIDs that a scan can never list. */
+  String force;
+  const bool forced = param("force", force) && (force == "1" || force == "true");
+  if (!forced && _net) {
+    bool seen = false;
+    for (uint8_t i = 0; i < _net->networkCount(); ++i) {
+      if (ssid == _net->networks()[i].ssid) { seen = true; break; }
+    }
+    if (!seen) {
+      sendJson(409, F("{\"error\":\"ssid_not_visible\",\"detail\":"
+                      "\"That network was not in the last scan. Rescan, or "
+                      "resend with force=1 if it is hidden.\"}"));
+      return;
+    }
+  }
+
+  strlcpy(_pendingSsid, ssid.c_str(), sizeof(_pendingSsid));
+  strlcpy(_pendingPass, pass.c_str(), sizeof(_pendingPass));
+  _wifiChangePending = true;
+
+  /* Say plainly that this connection is about to die - a browser error
+   * after this point is expected, not a failure. */
+  sendJson(200, F("{\"ok\":true,\"note\":\"Joining the new network. This page "
+                  "will lose contact; reconnect your browser to the new "
+                  "address shown on the device.\"}"));
+}
+
+void ApiServer::handleWifiForget() {
+  if (_net) _net->forgetCredentials();
   sendJson(200, F("{\"ok\":true}"));
 }
 

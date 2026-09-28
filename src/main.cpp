@@ -30,6 +30,7 @@
 #include "InputManager.h"
 #include "Log.h"
 #include "NetManager.h"
+#include "SerialConsole.h"
 #include "SpotifyClient.h"
 #include "UiController.h"
 #include "config.h"
@@ -47,9 +48,44 @@ static AlbumArt       albumArt;
 static InputManager   input;
 static UiController   ui;
 static ApiServer      api;
+static SerialConsole  console;
 
 static PlaybackState  state;
 static AppStatus      status;
+
+/* Loop-time watchdog.
+ *
+ * Everything shares one task, so any blocking call freezes touch sampling
+ * and rendering along with it. When that happens the symptoms are
+ * indistinguishable from broken hardware: buttons do not light up, the
+ * screen does not follow changes made elsewhere, and taps are missed
+ * because the panel is only sampled in the gaps.
+ *
+ * A healthy iteration here is well under a millisecond; a poll is a couple
+ * of hundred. Anything approaching a second means the UI was unresponsive
+ * for that long, and this is the only way to tell that apart from a touch
+ * fault without a scope. */
+static void watchLoopTime() {
+  static uint32_t last = 0, worst = 0, worstAt = 0, reportedAt = 0;
+  const uint32_t now = millis();
+
+  if (last) {
+    const uint32_t dt = now - last;
+    if (dt > worst) { worst = dt; worstAt = now; }
+  }
+  last = now;
+
+  if (now - reportedAt < 10000UL) return;
+  reportedAt = now;
+  if (worst >= 300) {
+    LOG_I("loop: worst iteration %lums (%lus ago) - the UI was frozen that "
+          "long; touch and redraws were starved",
+          (unsigned long)worst, (unsigned long)((now - worstAt) / 1000));
+  } else {
+    LOG_D("loop: worst iteration %lums", (unsigned long)worst);
+  }
+  worst = 0;
+}
 
 /* Heap watchdog: a slow leak on an embedded device shows up as a reboot
  * days later, which is miserable to debug. Logging the floor every 30 s
@@ -112,11 +148,13 @@ void setup() {
   /* Reserve the big buffers before the network stack fragments the heap. */
   albumArt.begin(&display);
   input.begin();
+  input.selfTest();
 
   net.begin();
   spotify.begin(&state, &status);
   ui.begin(&display, &spotify, &net, &albumArt, &state, &status);
   api.begin(&spotify, &state, &status, &net);
+  console.begin(&net, &spotify, &input, &state, &status);
 }
 
 void loop() {
@@ -131,7 +169,19 @@ void loop() {
     spotify.onNetworkUp();
     albumArt.invalidate();          /* re-fetch art after a reconnect */
     api.start();                    /* the listener needs an address  */
-    status.setMessage("Wi-Fi connected", 2500);
+
+    if (input.touchHealthy()) {
+      status.setMessage("Wi-Fi connected", 2500);
+    } else {
+      /* With no working touch panel the only way in is the browser, so say
+       * where - otherwise the address is buried in a boot log the user has
+       * no reason to still be watching. */
+      char msg[MESSAGE_LEN];
+      snprintf(msg, sizeof(msg), "No touch detected - control at http://%s/",
+               net.ip());
+      status.setMessage(msg, 60000UL);
+      LOG_I("ui: %s", msg);
+    }
   }
   if (!net.isUp() && api.running()) api.stop();
 
@@ -148,7 +198,11 @@ void loop() {
   /* 5. Serve at most one web request. */
   api.service();
 
-  /* 6. Repaint whatever changed on whichever screen is showing. */
+  /* 6. The recovery console. Last resort when touch is dead and the stored
+   *    network is wrong - it needs neither to work. */
+  console.service();
+
+  /* 7. Repaint whatever changed on whichever screen is showing. */
   status.expireMessage();
   ui.render();
 
@@ -156,5 +210,6 @@ void loop() {
    * back instead of leaving an empty frame until the next album. */
   if (display.consumeArtInvalidated()) albumArt.invalidate();
 
+  watchLoopTime();
   logHeap();
 }
